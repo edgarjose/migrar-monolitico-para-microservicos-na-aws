@@ -1,68 +1,61 @@
-# monolitico-para-microservicos
-A migração de uma arquitetura monolítica para microserviços
+# Migrar WordPress entre EC2 e RDS
 
-Resumo das Etapas para Backup e Restauração de um Website WordPress com Base de Dados em RDS e EC2
+Procedimento de backup e restauro dos ficheiros e da base de dados de um WordPress. O nome histórico do repositório refere microserviços, mas os passos aqui descritos **não decompõem a aplicação em microserviços**: transferem um site e separam a sua base de dados.
 
-## 1 - Backup da Base de Dados
-Faz o dump (cópia) da base de dados WordPress:
+## Âmbito
 
-mysqldump -u admin -p wordpressdb > wordpressdb.sql
+```mermaid
+flowchart LR
+  Original[WordPress original] -->|Ficheiros e dump| S3[Bucket privado]
+  S3 --> Nova[EC2 de destino]
+  S3 -->|Importação SQL| RDS[RDS de destino]
+  Nova --> RDS
+```
 
-## 2 - Transferir o Dump da Base de Dados para um Bucket S3
-Carrega o ficheiro dump para o bucket S3:
+O procedimento pressupõe uma EC2 de destino com Apache/PHP compatíveis com a versão do WordPress e uma base de dados RDS já criada. A criação desses recursos não é automatizada neste repositório.
 
-aws s3 cp wordpressdb.sql s3://bucketparabackup001/database_backup/
+## Antes de migrar
 
-## 3 - Backup do Website (Arquivos)
-Faz backup dos arquivos do site WordPress (diretório html):
+- Ensaiar numa cópia; planear a janela de escrita/manutenção para obter um backup consistente.
+- Usar um bucket privado, permissões limitadas e encriptação para os backups.
+- Registar versões de PHP, MySQL/MariaDB, WordPress, plugins e caminho real do site.
+- Guardar `wp-config.php` como segredo: contém credenciais e não deve entrar no Git.
+- Confirmar conectividade da EC2 para o RDS sem publicar a porta 3306 na internet.
 
-sudo tar czf wordpress.tar.gz html
+## Backup na origem
 
-## 4 - Transferir o Arquivo do Website para o Bucket S3
-Carrega o arquivo do website para o bucket S3:
+Substituir os valores pelos teus, sem colocar a palavra-passe na linha de comando:
 
-aws s3 cp wordpresswebsite.tar.gz s3://ec2-backup-bucket01/website-backup/
+```bash
+export BACKUP_BUCKET=SEU_BUCKET_PRIVADO
+mysqldump -h HOST_ORIGEM -u UTILIZADOR_ORIGEM -p --single-transaction wordpressdb > wordpressdb.sql
+sudo tar -C /var/www -czf wordpress.tar.gz html
+aws s3 cp wordpressdb.sql "s3://$BACKUP_BUCKET/wordpress-migration/wordpressdb.sql"
+aws s3 cp wordpress.tar.gz "s3://$BACKUP_BUCKET/wordpress-migration/wordpress.tar.gz"
+```
 
-## 5 - Criar uma Nova Instância EC2 com Amazon Linux 2
-Atualiza os pacotes na nova instância EC2 (Amazon Linux 2):
+`--single-transaction` pressupõe tabelas transacionais e não torna os ficheiros do site consistentes com alterações simultâneas. Não usar estes comandos como substituto de uma estratégia de backup testada.
 
-sudo yum update -y
+## Restauro no destino
 
-## Instalar o Apache:
-sudo yum install httpd -y
+Num diretório de trabalho protegido na EC2 de destino:
 
-sudo systemctl start httpd
+```bash
+aws s3 cp "s3://$BACKUP_BUCKET/wordpress-migration/wordpressdb.sql" .
+aws s3 cp "s3://$BACKUP_BUCKET/wordpress-migration/wordpress.tar.gz" .
+mysql -h ENDPOINT_RDS -u UTILIZADOR_DESTINO -p wordpressdb < wordpressdb.sql
+tar -xzf wordpress.tar.gz
+sudo cp -a html/. /var/www/html/
+```
 
-sudo systemctl enable httpd
+Criar a base de dados e o utilizador de destino antes da importação. Editar `/var/www/html/wp-config.php` com o nome da base de dados, o utilizador e o endpoint RDS corretos. Aplicar as permissões de ficheiros apropriadas ao servidor de destino.
 
-## Instala o PHP 7.4:
-sudo amazon-linux-extras install -y php7.4
+## Verificar e terminar
 
-sudo systemctl restart httpd
+Testar a página inicial, login, media, links permanentes e plugins antes de alterar DNS. Se o domínio mudar, usar ferramentas do WordPress que preservem dados serializados; não fazer substituições SQL indiscriminadas.
 
-Instala o cliente de base de dados MariaDB:
+Manter uma cópia de segurança e um plano de retorno durante a mudança. Remover dumps locais e recursos de laboratório quando já não forem necessários, de acordo com a política de retenção. EC2, RDS e S3 podem gerar custos.
 
-sudo yum install mariadb
+## Próxima etapa arquitetural
 
-## 7 - Transferir os Arquivos da base de dados do S3 para EC2
-Faz o download dos arquivos do website a partir do S3 para a instância EC2:
-
-aws s3 sync s3://ec2-backup-bucket01/wordpressdb.sql/ /home/ec2-user
-
-## 8 - Transferir os Arquivos do Website do S3 para EC2
-Faz o download dos arquivos do website a partir do S3 para a instância EC2:
-
-aws s3 sync s3://ec2-backup-bucket01/website-backup/ /home/ec2-user
-
-## 9 - Transferir o Dump da Base de Dados para o RDS
-mysql -h demo-database001.crhrnvptqdno.us-east-1.rds.amazonaws.com -u admin -p wordpredb < wordpressdb.sql
-
-## 10 - Descompactar os Arquivos do Website e Mover para o Diretório Apache
-tar xvf community_images.tar.gz
-
-cd html
-
-sudo vi wp-config.php
-
-sudo mv html/* /var/www/html/
-
+Uma migração real para microserviços exigiria definir limites de domínio, APIs, persistência e operação de cada serviço. Para um exemplo de comunicação entre serviços independentes, consultar [ECS Networking & Service Discovery](https://github.com/edgarjose/ecs-networking-service-discovery-lab).
